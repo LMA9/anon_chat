@@ -1,6 +1,7 @@
 use std::net::{TcpListener, TcpStream, Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::time::SystemTime;
 use std::thread;
+use std::sync::{Arc, Mutex};
 use std::io::stdin;
 
 struct Connection {
@@ -10,14 +11,16 @@ struct Connection {
 
 struct Chat<'a> {
     id: u64,
+    name: String,
     connection: Connection,
     messages: Vec<Message<'a>>
 }
 
 impl<'a> Chat<'a> {
-    fn new(id: u64, connection: Connection) -> Chat<'a> {
+    fn new(id: u64, name: String, connection: Connection) -> Chat<'a> {
         Chat {
             id,
+            name,
             connection,
             messages: Vec::new()
         }
@@ -73,6 +76,90 @@ impl<'a> Client<'a> {
         }
     }
 
+    pub fn run(& mut self) {
+        'running: loop {
+            let selected_option = Client::main_menu();
+            match selected_option {
+                0 => {
+                    println!("Quiting...");
+                    break 'running
+                },
+                1 => self.listen_connections(),
+                2 => self.accept_connection_request(),
+                3 => {
+                    match self.select_chat() {
+                        Some(chat) => {
+                            println!("Selected {} chat", chat.name)
+                        },
+                        None => {}
+                    }
+                },
+                _ => {
+                    println!("Unknown option. Quiting...");
+                    break 'running
+                }
+            }
+        }
+    }
+
+    pub fn main_menu() -> usize {
+        let menu_options = [
+            (0, "Exit"),
+            (1, "Listen conections."),
+            (2, "Accept request."),
+            (3, "Select chat."),
+        ];
+        loop {
+            println!("Select menu option:\n{}", menu_options.iter().map(|(i, s)| format!("{}. {}", i, s)).collect::<Vec<String>>().join("\n"));
+            let mut selected_option = String::new();
+            stdin().read_line(&mut selected_option).unwrap();
+            selected_option = selected_option.trim().to_string();
+            match selected_option.parse::<usize>() {
+                Ok(n) => {
+                    for (index, _) in menu_options.iter() {
+                        if n == *index {
+                            return n 
+                        }
+                    }
+                    println!("Error: Incorrect option!")
+                },
+                Err(e) => {
+                    println!("Error: Incorrect option!\n{}", e)
+                }
+            }
+        }
+
+    }
+
+    fn accept_connection_request(&mut self) {
+        if self.requests.is_empty() {
+            println!("You have no requests.")
+        } else {
+            loop {
+                println!("Accept request from:");
+                for (i, request) in self.requests.iter().enumerate() {
+                    println!("{}. {}", i, request.addr )
+                }
+                let mut selected_request = String::new();
+                stdin().read_line(&mut selected_request).unwrap();
+                selected_request = selected_request.trim().to_string();
+                match selected_request.parse::<usize>() {
+                    Ok(n) => {
+                        for (index, request) in self.requests.iter().enumerate() {
+                            if n == index {
+                                return
+                            }
+                        }
+                        println!("Error: Incorrect option!")
+                    },
+                    Err(e) => {
+                        println!("Error: Incorrect option!\n{}", e)
+                    }
+                }
+            }
+        }
+    }
+
     fn listen_connections(&mut self) {
         println!("Listening connections...");
         'listening: loop {
@@ -91,48 +178,34 @@ impl<'a> Client<'a> {
         }
     }
 
-    pub fn run(&mut self) {
-        'running: loop {
-            let selected_option = Client::main_menu();
-            match selected_option {
-                0 => {
-                    println!("Quiting...");
-                    break 'running
-                },
-                1 => self.listen_connections(),
-                _ => {
-                    println!("Unknown option. Quiting...");
-                    break 'running
+    fn select_chat(&mut self) -> Option<&Chat> {
+        if self.chats.is_empty() {
+            println!("You have no chats.");
+            return None
+        } else {
+            loop {
+                println!("Select chat:");
+                for (i, chat) in self.chats.iter().enumerate() {
+                    println!("{}. {}", i, chat.name)
                 }
-            }
-        }
-    }
-
-    pub fn main_menu() -> u8 {
-        let menu_options = [
-            (0, "Exit"),
-            (1, "Listen conection."),
-        ];
-        loop {
-            println!("Select menu option:\n{}", menu_options.iter().map(|(i, s)| format!("{}. {}", i, s)).collect::<Vec<String>>().join("\n"));
-            let mut selected_option = String::new();
-            stdin().read_line(&mut selected_option).unwrap();
-            selected_option = selected_option.trim().to_string();
-            match selected_option.parse::<u8>() {
-                Ok(n) => {
-                    for (index, _) in menu_options.iter() {
-                        if n == *index {
-                            return n 
+                let mut selected_chat = String::new();
+                stdin().read_line(&mut selected_chat).unwrap();
+                selected_chat = selected_chat.trim().to_string();
+                match selected_chat.parse::<usize>() {
+                    Ok(n) => {
+                        for (index, chat) in self.chats.iter().enumerate() {
+                            if n == index {
+                                return Some(chat)
+                            }
                         }
+                        println!("Error: Incorrect option!")
+                    },
+                    Err(e) => {
+                        println!("Error: Incorrect option!\n{}", e)
                     }
-                    println!("Error: Incorrect option!")
-                },
-                Err(e) => {
-                    println!("Error: Incorrect option!\n{}", e)
                 }
             }
         }
-
     }
 }
 
