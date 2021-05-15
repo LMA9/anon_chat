@@ -9,6 +9,12 @@ struct Connection {
     stream: TcpStream
 }
 
+impl Connection {
+    fn new(addr: SocketAddr, stream: TcpStream) -> Connection {
+        Connection { addr, stream }
+    }
+}
+
 struct Chat<'a> {
     id: u64,
     name: String,
@@ -86,7 +92,8 @@ impl<'a> Client<'a> {
                 },
                 1 => self.listen_connections(),
                 2 => self.accept_connection_request(),
-                3 => {
+                3 => self.send_chat_request(),
+                4 => {
                     match self.select_chat() {
                         Some(chat) => {
                             println!("Selected {} chat", chat.name)
@@ -106,8 +113,9 @@ impl<'a> Client<'a> {
         let menu_options = [
             (0, "Exit"),
             (1, "Listen conections."),
-            (2, "Accept request."),
-            (3, "Select chat."),
+            (2, "Accept chat request."),
+            (3, "Send chat request."),
+            (4, "Select chat."),
         ];
         loop {
             println!("Select menu option:\n{}", menu_options.iter().map(|(i, s)| format!("{}. {}", i, s)).collect::<Vec<String>>().join("\n"));
@@ -129,6 +137,25 @@ impl<'a> Client<'a> {
             }
         }
 
+    }
+
+    fn send_chat_request(&mut self) {
+        println!("Please, enter address to connection(e.g: 10.10.14.132:777):\n");
+        let mut connection_addr = String::new();
+        stdin().read_line(&mut connection_addr).unwrap();
+        connection_addr = connection_addr.trim().to_string();
+        match connection_addr.parse::<SocketAddrV4>() {
+            Ok(addr) => {
+                if let Ok(stream) = TcpStream::connect(addr) {
+                    let new_connection = Connection::new(SocketAddr::V4(addr), stream);
+                    let new_chat = Chat::new(9, String::from("Some chat"), new_connection);
+                    self.chats.push(new_chat);
+                } else {
+                    println!("Could not connect to this address. Aborting...")
+                }
+            },
+            Err(e) => println!("Error to parse connection address: {}", e)
+        }
     }
 
     fn accept_connection_request(&mut self) {
