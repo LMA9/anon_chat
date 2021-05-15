@@ -174,7 +174,7 @@ impl<'a> Client<'a> {
                     Ok(n) => {
                         for (index, request) in self.requests.iter().enumerate() {
                             if n == index {
-                                return
+                                return 
                             }
                         }
                         println!("Error: Incorrect option!")
