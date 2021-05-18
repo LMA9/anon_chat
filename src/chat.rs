@@ -3,6 +3,7 @@ use std::time::SystemTime;
 use std::thread;
 use std::sync::{Arc, Mutex};
 use std::io::stdin;
+use std::io::prelude::*;
 
 struct Connection {
     addr: SocketAddr,
@@ -65,7 +66,7 @@ pub struct Client<'a> {
     socket_addr: SocketAddr,
     listener: TcpListener,
     chats: Vec<Chat<'a>>,
-    requests: Vec<Request>,
+    requests: Vec<Connection>,
 }
 
 impl<'a> Client<'a> {
@@ -146,7 +147,9 @@ impl<'a> Client<'a> {
         connection_addr = connection_addr.trim().to_string();
         match connection_addr.parse::<SocketAddrV4>() {
             Ok(addr) => {
-                if let Ok(stream) = TcpStream::connect(addr) {
+                if let Ok(mut stream) = TcpStream::connect(addr) {
+                    stream.write(&self.id.to_be_bytes()).unwrap();
+                    stream.write(self.name.as_bytes()).unwrap();
                     let new_connection = Connection::new(SocketAddr::V4(addr), stream);
                     let new_chat = Chat::new(9, String::from("Some chat"), new_connection);
                     self.chats.push(new_chat);
@@ -154,8 +157,50 @@ impl<'a> Client<'a> {
                     println!("Could not connect to this address. Aborting...")
                 }
             },
-            Err(e) => println!("Error to parse connection address: {}", e)
+            Err(e) => println!("Wrong connection address: {}", e)
         }
+    }
+
+    fn parse_request(mut request: Connection) -> Option<Chat<'a>> {
+        let mut id_buffer: [u8; 8] = [0; 8];
+        let target_id: u64;
+        match request.stream.read(&mut id_buffer) {
+            Ok(n) => {
+                if n == 0 {
+                    println!("Connection has been closed.");
+                    return None
+                } else {
+                    target_id = u64::from_be_bytes(id_buffer)
+                }
+            },
+            Err(e) => {
+                println!("Error with reading ID from {}: {}", request.addr, e);
+                return None
+            }
+        };
+        let mut name_buffer: Vec<u8> = Vec::new();
+        let target_name: String;
+        match request.stream.read(&mut name_buffer) {
+            Ok(n) => {
+                if n == 0 {
+                    println!("Connection has been closed.");
+                    return None
+                } else {
+                    match String::from_utf8(name_buffer) {
+                        Ok(name) => target_name = name,
+                        Err(e) => {
+                            println!("Error with reading Name from {}: {}", request.addr, e);
+                            return None
+                        }
+                    }
+                }
+            },
+            Err(e) => {
+                println!("Error with data reading ID from {}: {}", request.addr, e);
+                return None
+            }
+        };
+        Some(Chat::new(target_id, target_name, request))
     }
 
     fn accept_connection_request(&mut self) {
@@ -172,12 +217,12 @@ impl<'a> Client<'a> {
                 selected_request = selected_request.trim().to_string();
                 match selected_request.parse::<usize>() {
                     Ok(n) => {
-                        for (index, request) in self.requests.iter().enumerate() {
-                            if n == index {
-                                return 
-                            }
-                        }
-                        println!("Error: Incorrect option!")
+                        let request = self.requests.remove(n);
+                        if let Some(chat) = Client::parse_request(request) {
+
+                        } else {
+
+                        };
                     },
                     Err(e) => {
                         println!("Error: Incorrect option!\n{}", e)
@@ -193,9 +238,9 @@ impl<'a> Client<'a> {
 
             // Проверка новых подключений
             match self.listener.accept() {
-                Ok((socket, addr)) => {
+                Ok((stream, addr)) => {
                     println!("New connection with {}", addr);
-                    self.requests.push(Request { socket, addr });
+                    self.requests.push(Connection { stream, addr });
                     break 'listening
                 }
                 Err(e) => {println!("Connection failed: {}", e)},
@@ -234,9 +279,4 @@ impl<'a> Client<'a> {
             }
         }
     }
-}
-
-struct Request {
-    socket: TcpStream,
-    addr: SocketAddr,
 }
