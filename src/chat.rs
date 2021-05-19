@@ -148,8 +148,9 @@ impl<'a> Client<'a> {
         match connection_addr.parse::<SocketAddrV4>() {
             Ok(addr) => {
                 if let Ok(mut stream) = TcpStream::connect(addr) {
-                    stream.write(&self.id.to_be_bytes()).unwrap();
-                    stream.write(self.name.as_bytes()).unwrap();
+                    let mut data = Vec::from(self.id.to_be_bytes());
+                    data.append(&mut self.name.as_bytes().to_vec());
+                    stream.write(&mut data).unwrap();
                     let new_connection = Connection::new(SocketAddr::V4(addr), stream);
                     let new_chat = Chat::new(9, String::from("Some chat"), new_connection);
                     self.chats.push(new_chat);
@@ -161,72 +162,84 @@ impl<'a> Client<'a> {
         }
     }
 
-    fn parse_request(mut request: Connection) -> Option<Chat<'a>> {
+    fn parse_request(mut connection: Connection) -> Option<Chat<'a>> {
         let mut id_buffer: [u8; 8] = [0; 8];
         let target_id: u64;
-        match request.stream.read(&mut id_buffer) {
-            Ok(n) => {
-                if n == 0 {
-                    println!("Connection has been closed.");
-                    return None
-                } else {
-                    target_id = u64::from_be_bytes(id_buffer)
-                }
-            },
-            Err(e) => {
-                println!("Error with reading ID from {}: {}", request.addr, e);
-                return None
-            }
-        };
-        let mut name_buffer: Vec<u8> = Vec::new();
+        let s = &mut connection.stream;
+        let mut handler = s.take(8);
+        handler.read_exact(&mut id_buffer).expect("Failed to parse chat ID");
+        target_id = u64::from_be_bytes(id_buffer);
+        println!("ID was parsed: {}", target_id);
+        
+        let mut name_buffer: [u8; 512] = [0; 512];
         let target_name: String;
-        match request.stream.read(&mut name_buffer) {
+        let s = &mut connection.stream;
+        let mut handler = s.take(512);
+        match handler.read(&mut name_buffer) {
             Ok(n) => {
-                if n == 0 {
-                    println!("Connection has been closed.");
-                    return None
-                } else {
-                    match String::from_utf8(name_buffer) {
-                        Ok(name) => target_name = name,
-                        Err(e) => {
-                            println!("Error with reading Name from {}: {}", request.addr, e);
-                            return None
-                        }
+                match String::from_utf8(name_buffer.to_vec()) {
+                    Ok(name) => target_name = name,
+                    Err(e) => {
+                        println!("Error with reading Name from {}: {}", connection.addr, e);
+                        return None
                     }
                 }
             },
             Err(e) => {
-                println!("Error with data reading ID from {}: {}", request.addr, e);
+                println!("Error with reading Name from {}: {}", connection.addr, e);
                 return None
             }
-        };
-        Some(Chat::new(target_id, target_name, request))
+        }
+        
+
+        // match connection.stream.read(&mut name_buffer) {
+        //     Ok(n) => {
+        //         if n == 0 {
+        //             println!("Connection has been closed.");
+        //             return None
+        //         } else {
+        //             match String::from_utf8(name_buffer.to_vec()) {
+        //                 Ok(name) => target_name = name,
+        //                 Err(e) => {
+        //                     println!("Error with reading Name from {}: {}", connection.addr, e);
+        //                     return None
+        //                 }
+        //             }
+        //         }
+        //     },
+        //     Err(e) => {
+        //         println!("Error with reading chat name from {}: {}", connection.addr, e);
+        //         return None
+        //     }
+        // };
+
+        Some(Chat::new(target_id, target_name, connection))
     }
 
     fn accept_connection_request(&mut self) {
         if self.requests.is_empty() {
             println!("You have no requests.")
         } else {
-            loop {
-                println!("Accept request from:");
-                for (i, request) in self.requests.iter().enumerate() {
-                    println!("{}. {}", i, request.addr )
-                }
-                let mut selected_request = String::new();
-                stdin().read_line(&mut selected_request).unwrap();
-                selected_request = selected_request.trim().to_string();
-                match selected_request.parse::<usize>() {
-                    Ok(n) => {
-                        let request = self.requests.remove(n);
-                        if let Some(chat) = Client::parse_request(request) {
-
-                        } else {
-
-                        };
-                    },
-                    Err(e) => {
-                        println!("Error: Incorrect option!\n{}", e)
-                    }
+            println!("Accept request from:");
+            for (i, request) in self.requests.iter().enumerate() {
+                println!("{}. {}", i, request.addr )
+            }
+            let mut selected_request = String::new();
+            stdin().read_line(&mut selected_request).unwrap();
+            selected_request = selected_request.trim().to_string();
+            match selected_request.parse::<usize>() {
+                Ok(n) => {
+                    let request = self.requests.remove(n);
+                    if let Some(chat) = Client::parse_request(request) {
+                        println!("Chat with {} name was created!", chat.name);
+                        self.chats.push(chat);
+                        return
+                    } else {
+                        println!("Unable to accept request. Aborting...")
+                    };
+                },
+                Err(e) => {
+                    println!("Error: Incorrect option!\n{}", e)
                 }
             }
         }
@@ -240,7 +253,7 @@ impl<'a> Client<'a> {
             match self.listener.accept() {
                 Ok((stream, addr)) => {
                     println!("New connection with {}", addr);
-                    self.requests.push(Connection { stream, addr });
+                    self.requests.push(Connection::new(addr, stream));
                     break 'listening
                 }
                 Err(e) => {println!("Connection failed: {}", e)},
