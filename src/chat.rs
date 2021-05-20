@@ -140,6 +140,12 @@ impl<'a> Client<'a> {
 
     }
 
+    fn send_self_creds(&self, stream: &mut TcpStream) {
+        let mut data = Vec::from(self.id.to_be_bytes());
+        data.append(&mut self.name.as_bytes().to_vec());
+        stream.write(&mut data).unwrap();
+    }
+
     fn send_chat_request(&mut self) {
         println!("Please, enter address to connection(e.g: 10.10.14.132:777):\n");
         let mut connection_addr = String::new();
@@ -148,72 +154,23 @@ impl<'a> Client<'a> {
         match connection_addr.parse::<SocketAddrV4>() {
             Ok(addr) => {
                 if let Ok(mut stream) = TcpStream::connect(addr) {
-                    let mut data = Vec::from(self.id.to_be_bytes());
-                    data.append(&mut self.name.as_bytes().to_vec());
-                    stream.write(&mut data).unwrap();
+                    self.send_self_creds(&mut stream);
                     let new_connection = Connection::new(SocketAddr::V4(addr), stream);
-                    let new_chat = Chat::new(9, String::from("Some chat"), new_connection);
-                    self.chats.push(new_chat);
+                    println!("New connection created! Please wait for opponent accept request...");
+                    
+                    if let Some(mut new_chat) = Client::parse_request(new_connection) {
+                        self.send_self_creds(&mut new_chat.connection.stream);
+                        println!("Chat with {} name was created!", new_chat.name);
+                        self.chats.push(new_chat)
+                    } else {
+                        println!("Unable to accept opponent creds. Aborting...")
+                    }
                 } else {
                     println!("Could not connect to this address. Aborting...")
                 }
             },
             Err(e) => println!("Wrong connection address: {}", e)
         }
-    }
-
-    fn parse_request(mut connection: Connection) -> Option<Chat<'a>> {
-        let mut id_buffer: [u8; 8] = [0; 8];
-        let target_id: u64;
-        let s = &mut connection.stream;
-        let mut handler = s.take(8);
-        handler.read_exact(&mut id_buffer).expect("Failed to parse chat ID");
-        target_id = u64::from_be_bytes(id_buffer);
-        println!("ID was parsed: {}", target_id);
-        
-        let mut name_buffer: [u8; 512] = [0; 512];
-        let target_name: String;
-        let s = &mut connection.stream;
-        let mut handler = s.take(512);
-        match handler.read(&mut name_buffer) {
-            Ok(n) => {
-                match String::from_utf8(name_buffer.to_vec()) {
-                    Ok(name) => target_name = name,
-                    Err(e) => {
-                        println!("Error with reading Name from {}: {}", connection.addr, e);
-                        return None
-                    }
-                }
-            },
-            Err(e) => {
-                println!("Error with reading Name from {}: {}", connection.addr, e);
-                return None
-            }
-        }
-        
-
-        // match connection.stream.read(&mut name_buffer) {
-        //     Ok(n) => {
-        //         if n == 0 {
-        //             println!("Connection has been closed.");
-        //             return None
-        //         } else {
-        //             match String::from_utf8(name_buffer.to_vec()) {
-        //                 Ok(name) => target_name = name,
-        //                 Err(e) => {
-        //                     println!("Error with reading Name from {}: {}", connection.addr, e);
-        //                     return None
-        //                 }
-        //             }
-        //         }
-        //     },
-        //     Err(e) => {
-        //         println!("Error with reading chat name from {}: {}", connection.addr, e);
-        //         return None
-        //     }
-        // };
-
-        Some(Chat::new(target_id, target_name, connection))
     }
 
     fn accept_connection_request(&mut self) {
@@ -230,10 +187,10 @@ impl<'a> Client<'a> {
             match selected_request.parse::<usize>() {
                 Ok(n) => {
                     let request = self.requests.remove(n);
-                    if let Some(chat) = Client::parse_request(request) {
+                    if let Some(mut chat) = Client::parse_request(request) {
+                        self.send_self_creds(&mut chat.connection.stream);
                         println!("Chat with {} name was created!", chat.name);
-                        self.chats.push(chat);
-                        return
+                        self.chats.push(chat)
                     } else {
                         println!("Unable to accept request. Aborting...")
                     };
@@ -243,6 +200,38 @@ impl<'a> Client<'a> {
                 }
             }
         }
+    }
+
+    fn parse_request(mut connection: Connection) -> Option<Chat<'a>> {
+        let mut id_buffer: [u8; 8] = [0; 8];
+        let target_id: u64;
+        let s = &mut connection.stream;
+        let mut handler = s.take(8);
+        handler.read_exact(&mut id_buffer).expect("Failed to parse chat ID");
+        target_id = u64::from_be_bytes(id_buffer);
+        println!("ID was parsed: {}", target_id);
+        
+        let mut name_buffer: [u8; 32] = [0; 32];
+        let target_name: String;
+        let s = &mut connection.stream;
+        let mut handler = s.take(32);
+        match handler.read(&mut name_buffer) {
+            Ok(n) => {
+                match String::from_utf8(name_buffer[..n].to_vec()) {
+                    Ok(name) => target_name = name,
+                    Err(e) => {
+                        println!("Error with reading Name from {}: {}", connection.addr, e);
+                        return None
+                    }
+                }
+            },
+            Err(e) => {
+                println!("Error with reading Name from {}: {}", connection.addr, e);
+                return None
+            }
+        }
+
+        Some(Chat::new(target_id, target_name, connection))
     }
 
     fn listen_connections(&mut self) {
