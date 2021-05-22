@@ -14,6 +14,38 @@ impl Connection {
     fn new(addr: SocketAddr, stream: TcpStream) -> Connection {
         Connection { addr, stream }
     }
+
+    fn into_chat<'a>(mut self) -> Option<Chat<'a>> {
+        let mut id_buffer: [u8; 8] = [0; 8];
+        let target_id: u64;
+        let s = &mut self.stream;
+        let mut handler = s.take(8);
+        handler.read_exact(&mut id_buffer).expect("Failed to parse chat ID");
+        target_id = u64::from_be_bytes(id_buffer);
+        println!("ID was parsed: {}", target_id);
+        
+        let mut name_buffer: [u8; 32] = [0; 32];
+        let target_name: String;
+        let s = &mut self.stream;
+        let mut handler = s.take(32);
+        match handler.read(&mut name_buffer) {
+            Ok(n) => {
+                match String::from_utf8(name_buffer[..n].to_vec()) {
+                    Ok(name) => target_name = name,
+                    Err(e) => {
+                        println!("Error with reading Name from {}: {}", self.addr, e);
+                        return None
+                    }
+                }
+            },
+            Err(e) => {
+                println!("Error with reading Name from {}: {}", self.addr, e);
+                return None
+            }
+        }
+
+        Some(Chat::new(target_id, target_name, self))
+    }
 }
 
 struct Chat<'a> {
@@ -64,26 +96,28 @@ pub struct Client<'a> {
     id: u64,
     name: String,
     socket_addr: SocketAddr,
-    listener: TcpListener,
+    listener: Arc<Mutex<TcpListener>>,
     chats: Vec<Chat<'a>>,
-    requests: Vec<Connection>,
+    requests: Arc<Mutex<Vec<Connection>>>
 }
 
 impl<'a> Client<'a> {
     pub fn new(name: String, socket_addr: SocketAddr) -> Client<'a> {
         let generated_id = 0;
         let listener = TcpListener::bind(socket_addr).unwrap();
+        listener.set_nonblocking(true).expect("Error with set nonblocking mode for listener.");
+
         Client {
             id: generated_id,
             name,
             socket_addr,
-            listener,
+            listener: Arc::new(Mutex::new(listener)),
             chats: Vec::new(),
-            requests: Vec::new()
+            requests: Arc::new(Mutex::new(Vec::new()))
         }
     }
 
-    pub fn run(& mut self) {
+    pub fn run(&mut self) {
         'running: loop {
             let selected_option = Client::main_menu();
             match selected_option {
@@ -119,7 +153,7 @@ impl<'a> Client<'a> {
             (4, "Select chat."),
         ];
         loop {
-            println!("Select menu option:\n{}", menu_options.iter().map(|(i, s)| format!("{}. {}", i, s)).collect::<Vec<String>>().join("\n"));
+            println!("\u{001b}[2JSelect menu option:\n{}", menu_options.iter().map(|(i, s)| format!("{}. {}", i, s)).collect::<Vec<String>>().join("\n"));
             let mut selected_option = String::new();
             stdin().read_line(&mut selected_option).unwrap();
             selected_option = selected_option.trim().to_string();
@@ -137,7 +171,6 @@ impl<'a> Client<'a> {
                 }
             }
         }
-
     }
 
     fn send_self_creds(&self, stream: &mut TcpStream) {
@@ -157,8 +190,8 @@ impl<'a> Client<'a> {
                     self.send_self_creds(&mut stream);
                     let new_connection = Connection::new(SocketAddr::V4(addr), stream);
                     println!("New connection created! Please wait for opponent accept request...");
-                    
-                    if let Some(mut new_chat) = Client::parse_request(new_connection) {
+
+                    if let Some(mut new_chat) = new_connection.into_chat() {
                         self.send_self_creds(&mut new_chat.connection.stream);
                         println!("Chat with {} name was created!", new_chat.name);
                         self.chats.push(new_chat)
@@ -174,11 +207,12 @@ impl<'a> Client<'a> {
     }
 
     fn accept_connection_request(&mut self) {
-        if self.requests.is_empty() {
+        let mut requests = self.requests.lock().unwrap();
+        if requests.is_empty() {
             println!("You have no requests.")
         } else {
             println!("Accept request from:");
-            for (i, request) in self.requests.iter().enumerate() {
+            for (i, request) in requests.iter().enumerate() {
                 println!("{}. {}", i, request.addr )
             }
             let mut selected_request = String::new();
@@ -186,8 +220,8 @@ impl<'a> Client<'a> {
             selected_request = selected_request.trim().to_string();
             match selected_request.parse::<usize>() {
                 Ok(n) => {
-                    let request = self.requests.remove(n);
-                    if let Some(mut chat) = Client::parse_request(request) {
+                    let request = requests.remove(n);
+                    if let Some(mut chat) = request.into_chat() {
                         self.send_self_creds(&mut chat.connection.stream);
                         println!("Chat with {} name was created!", chat.name);
                         self.chats.push(chat)
@@ -202,53 +236,21 @@ impl<'a> Client<'a> {
         }
     }
 
-    fn parse_request(mut connection: Connection) -> Option<Chat<'a>> {
-        let mut id_buffer: [u8; 8] = [0; 8];
-        let target_id: u64;
-        let s = &mut connection.stream;
-        let mut handler = s.take(8);
-        handler.read_exact(&mut id_buffer).expect("Failed to parse chat ID");
-        target_id = u64::from_be_bytes(id_buffer);
-        println!("ID was parsed: {}", target_id);
-        
-        let mut name_buffer: [u8; 32] = [0; 32];
-        let target_name: String;
-        let s = &mut connection.stream;
-        let mut handler = s.take(32);
-        match handler.read(&mut name_buffer) {
-            Ok(n) => {
-                match String::from_utf8(name_buffer[..n].to_vec()) {
-                    Ok(name) => target_name = name,
-                    Err(e) => {
-                        println!("Error with reading Name from {}: {}", connection.addr, e);
-                        return None
-                    }
-                }
-            },
-            Err(e) => {
-                println!("Error with reading Name from {}: {}", connection.addr, e);
-                return None
-            }
-        }
-
-        Some(Chat::new(target_id, target_name, connection))
-    }
-
     fn listen_connections(&mut self) {
-        println!("Listening connections...");
+        println!("New connections listener was started...");
         'listening: loop {
-
+            let listener = self.listener.lock().unwrap();
+    
             // Проверка новых подключений
-            match self.listener.accept() {
+            match listener.accept() {
                 Ok((stream, addr)) => {
                     println!("New connection with {}", addr);
-                    self.requests.push(Connection::new(addr, stream));
+                    let mut requests = self.requests.lock().unwrap();
+                    requests.push(Connection::new(addr, stream));
                     break 'listening
                 }
                 Err(e) => {println!("Connection failed: {}", e)},
             }
-
-
         }
     }
 
