@@ -1,6 +1,10 @@
+extern crate chrono;
+
+use chrono::{DateTime, Local};
 use std::net::{TcpListener, TcpStream, Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::time::SystemTime;
 use std::thread;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::io::stdin;
 use std::io::prelude::*;
@@ -15,7 +19,7 @@ impl Connection {
         Connection { addr, stream }
     }
 
-    fn into_chat<'a>(mut self) -> Option<Chat<'a>> {
+    fn into_chat<'a>(mut self) -> Option<Chat> {
         let mut id_buffer: [u8; 8] = [0; 8];
         let target_id: u64;
         let s = &mut self.stream;
@@ -48,15 +52,15 @@ impl Connection {
     }
 }
 
-struct Chat<'a> {
+struct Chat {
     id: u64,
     name: String,
     connection: Connection,
-    messages: Vec<Message<'a>>
+    messages: Vec<Message>
 }
 
-impl<'a> Chat<'a> {
-    fn new(id: u64, name: String, connection: Connection) -> Chat<'a> {
+impl Chat {
+    fn new(id: u64, name: String, connection: Connection) -> Chat {
         Chat {
             id,
             name,
@@ -65,47 +69,104 @@ impl<'a> Chat<'a> {
         }
     }
 
-    fn create_message(&'a self, sender_id: u64, text: String) -> Message<'a> {
-        Message::new(self, sender_id, text)
+    fn create_message(&self, sender_id: u64, text: String) -> Message {
+        Message::new(self.id, text)
     }
 
-    fn add_message(&mut self, message: Message<'a>) {
+    fn add_message(&mut self, message: Message) {
         self.messages.push(message)
     }
-}
 
-struct Message<'a> {
-    chat: &'a Chat<'a>,
-    sender_id: u64,
-    text: String,
-    date: SystemTime,
-}
+    fn check_new_message(&mut self) -> Option<Message> {
+        let mut message_buffer: [u8; 1024] = [0; 1024];
+        let s = &mut self.connection.stream;
+        let mut handler = s.take(1024);
+        // Блокирует основной поток
+        match handler.read(&mut message_buffer) {
+            Ok(n) => {
+                if n == 0 {
+                    return None
+                }
+                match String::from_utf8(message_buffer[..n].to_vec()) {
+                    Ok(message) => {
+                        let message = message.trim_end().to_string();
+                        Some(Message::new(self.id, message))
+                    },
+                    Err(e) => {
+                        println!("Error with reading message from {}: {}", self.connection.addr, e);
+                        return None
+                    }
+                }
+            },
+            Err(e) => {
+                println!("Error with reading message from {}: {}", self.connection.addr, e);
+                return None
+            }
+        }
+    }
 
-impl<'a> Message<'a> {
-    fn new(chat: &'a Chat<'a>, sender_id: u64, text: String) -> Message<'a> {
-        Message {
-            chat,
-            sender_id,
-            text,
-            date: SystemTime::now(),
+    fn send_message(&mut self, message: String) {
+        let mut message_data = message.as_bytes().to_vec();
+        self.connection.stream.write(&mut message_data).unwrap();
+    }
+    
+    fn start(&mut self) {
+        println!("Chat with {}({}) was started", self.name, self.id);
+        'chat: loop {
+            match self.check_new_message() {
+                Some(message) => {
+                    println!("{}({}): {} ({})", self.name, self.id, message.text, message.date.format("%H:%M:%S"));
+                    self.messages.push(message);
+                },
+                None => println!("No one new messages...")
+            }
+            
+            let mut my_message = String::new();
+            print!("Введите сообщение: ");
+            stdin().read_line(&mut my_message).unwrap();
+            my_message = my_message.trim_end().to_string();
+            if !my_message.is_empty() {
+                if my_message == "/exit" {
+                    break 'chat
+                } else {
+                    println!("You: {} ({})", my_message, Local::now().format("%H:%M:%S"));
+                    self.send_message(my_message);
+                }
+            }
         }
     }
 }
 
-pub struct Client<'a> {
+struct Message {
+    chat_id: u64,
+    text: String,
+    date: DateTime<Local>,
+}
+
+impl Message {
+    fn new(chat_id: u64, text: String) -> Message {
+        Message {
+            chat_id,
+            text,
+            date: Local::now(),
+        }
+    }
+}
+
+pub struct Client {
     id: u64,
     name: String,
     socket_addr: SocketAddr,
     listener: Arc<Mutex<TcpListener>>,
-    chats: Vec<Chat<'a>>,
+    chats: Vec<Chat>,
     requests: Arc<Mutex<Vec<Connection>>>
 }
 
-impl<'a> Client<'a> {
-    pub fn new(name: String, socket_addr: SocketAddr) -> Client<'a> {
+impl Client {
+    pub fn new(name: String, socket_addr: SocketAddr) -> Client {
         let generated_id = 0;
         let listener = TcpListener::bind(socket_addr).unwrap();
-        listener.set_nonblocking(true).expect("Error with set nonblocking mode for listener.");
+        // listener.set_nonblocking(true).expect("Error with set nonblocking mode for listener.");
 
         Client {
             id: generated_id,
@@ -130,9 +191,7 @@ impl<'a> Client<'a> {
                 3 => self.send_chat_request(),
                 4 => {
                     match self.select_chat() {
-                        Some(chat) => {
-                            println!("Selected {} chat", chat.name)
-                        },
+                        Some(chat) => chat.start(),
                         None => {}
                     }
                 },
@@ -254,13 +313,12 @@ impl<'a> Client<'a> {
         }
     }
 
-    fn select_chat(&mut self) -> Option<&Chat> {
+    fn select_chat(&mut self) -> Option<&mut Chat> {
         if self.chats.is_empty() {
             println!("You have no chats.");
             return None
         } else {
-            loop {
-                println!("Select chat:");
+            println!("Select chat:");
                 for (i, chat) in self.chats.iter().enumerate() {
                     println!("{}. {}", i, chat.name)
                 }
@@ -269,18 +327,19 @@ impl<'a> Client<'a> {
                 selected_chat = selected_chat.trim().to_string();
                 match selected_chat.parse::<usize>() {
                     Ok(n) => {
-                        for (index, chat) in self.chats.iter().enumerate() {
+                        for (index, chat) in self.chats.iter_mut().enumerate() {
                             if n == index {
                                 return Some(chat)
                             }
                         }
-                        println!("Error: Incorrect option!")
+                        println!("Error: Incorrect option!");
+                        return None
                     },
                     Err(e) => {
-                        println!("Error: Incorrect option!\n{}", e)
+                        println!("Error: Can't parse option!\n{}", e);
+                        return None
                     }
                 }
-            }
         }
     }
 }
