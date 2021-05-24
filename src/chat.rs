@@ -1,4 +1,4 @@
-use std::net::{TcpListener, TcpStream, Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::{net::{TcpListener, TcpStream, Ipv4Addr, SocketAddr, SocketAddrV4}, thread::JoinHandle};
 use std::time::SystemTime;
 use std::thread;
 use std::sync::{Arc, Mutex};
@@ -92,11 +92,16 @@ impl<'a> Message<'a> {
     }
 }
 
+struct RequestListener {
+    listener: TcpListener
+}
+
 pub struct Client<'a> {
     id: u64,
     name: String,
     socket_addr: SocketAddr,
     listener: Arc<Mutex<TcpListener>>,
+    listener_handler: Option<JoinHandle<()>>,
     chats: Vec<Chat<'a>>,
     requests: Arc<Mutex<Vec<Connection>>>
 }
@@ -105,13 +110,14 @@ impl<'a> Client<'a> {
     pub fn new(name: String, socket_addr: SocketAddr) -> Client<'a> {
         let generated_id = 0;
         let listener = TcpListener::bind(socket_addr).unwrap();
-        listener.set_nonblocking(true).expect("Error with set nonblocking mode for listener.");
+        // listener.set_nonblocking(true).expect("Error with set nonblocking mode for listener.");
 
         Client {
             id: generated_id,
             name,
             socket_addr,
             listener: Arc::new(Mutex::new(listener)),
+            listener_handler: None,
             chats: Vec::new(),
             requests: Arc::new(Mutex::new(Vec::new()))
         }
@@ -125,7 +131,7 @@ impl<'a> Client<'a> {
                     println!("Quiting...");
                     break 'running
                 },
-                1 => self.listen_connections(),
+                1 => self.toggle_connection_listening(),
                 2 => self.accept_connection_request(),
                 3 => self.send_chat_request(),
                 4 => {
@@ -141,6 +147,17 @@ impl<'a> Client<'a> {
                     break 'running
                 }
             }
+        }
+        self.stop_listener();
+    }
+
+    fn stop_listener(&mut self) {
+        match self.listener_handler {
+            Some(handler) => {
+                self.listener_handler = None;
+                handler.join().unwrap();
+            },
+            None => println!("Listener hasn't be started.")
         }
     }
 
@@ -236,20 +253,34 @@ impl<'a> Client<'a> {
         }
     }
 
-    fn listen_connections(&mut self) {
+    fn toggle_connection_listening(&mut self) {
+        match &self.listener_handler {
+            Some(handler) => self.listener_handler = None,
+            None => {
+                let listener = self.listener.clone();
+                let requests = self.requests.clone();
+                self.listener_handler = Some(thread::spawn(move || {
+                    Client::listen_connections(listener, requests)
+                }));
+            }
+        }
+        return
+    }
+
+    fn listen_connections(listener: Arc<Mutex<TcpListener>>, requests: Arc<Mutex<Vec<Connection>>>) {
         println!("New connections listener was started...");
         'listening: loop {
-            let listener = self.listener.lock().unwrap();
+            let listener = listener.lock().unwrap();
     
             // Проверка новых подключений
             match listener.accept() {
                 Ok((stream, addr)) => {
                     println!("New connection with {}", addr);
-                    let mut requests = self.requests.lock().unwrap();
+                    let mut requests = requests.lock().unwrap();
                     requests.push(Connection::new(addr, stream));
                     break 'listening
                 }
-                Err(e) => {println!("Connection failed: {}", e)},
+                Err(e) => println!("Connection failed: {}", e),
             }
         }
     }
