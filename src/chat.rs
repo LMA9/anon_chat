@@ -1,6 +1,7 @@
-use std::{net::{TcpListener, TcpStream, Ipv4Addr, SocketAddr, SocketAddrV4}, thread::JoinHandle};
-use std::time::SystemTime;
-use std::thread;
+extern crate chrono;
+
+use chrono::{DateTime, Local};
+use std::net::{TcpListener, TcpStream, SocketAddr, SocketAddrV4};
 use std::sync::{Arc, Mutex};
 use std::io::stdin;
 use std::io::prelude::*;
@@ -15,7 +16,7 @@ impl Connection {
         Connection { addr, stream }
     }
 
-    fn into_chat<'a>(mut self) -> Option<Chat<'a>> {
+    fn into_chat<'a>(mut self) -> Option<Chat> {
         let mut id_buffer: [u8; 8] = [0; 8];
         let target_id: u64;
         let s = &mut self.stream;
@@ -48,15 +49,15 @@ impl Connection {
     }
 }
 
-struct Chat<'a> {
+struct Chat {
     id: u64,
     name: String,
     connection: Connection,
-    messages: Vec<Message<'a>>
+    messages: Vec<Message>
 }
 
-impl<'a> Chat<'a> {
-    fn new(id: u64, name: String, connection: Connection) -> Chat<'a> {
+impl Chat {
+    fn new(id: u64, name: String, connection: Connection) -> Chat {
         Chat {
             id,
             name,
@@ -65,49 +66,101 @@ impl<'a> Chat<'a> {
         }
     }
 
-    fn create_message(&'a self, sender_id: u64, text: String) -> Message<'a> {
-        Message::new(self, sender_id, text)
-    }
-
-    fn add_message(&mut self, message: Message<'a>) {
+    fn add_message(&mut self, message: Message) {
+        let sender = if self.id == message.chat_id {
+            format!("{}({})", self.name, self.id)
+        } else {
+            String::from("You")
+        };
+        println!("{}: {} ({})", sender, message.text, message.date.format("%H:%M:%S"));
         self.messages.push(message)
     }
-}
 
-struct Message<'a> {
-    chat: &'a Chat<'a>,
-    sender_id: u64,
-    text: String,
-    date: SystemTime,
-}
+    fn check_new_message(&mut self) -> Option<Message> {
+        let mut message_buffer: [u8; 1024] = [0; 1024];
+        let s = &mut self.connection.stream;
+        let mut handler = s.take(1024);
+        // Блокирует основной поток
+        match handler.read(&mut message_buffer) {
+            Ok(n) => {
+                if n == 0 {
+                    return None
+                }
+                match String::from_utf8(message_buffer[..n].to_vec()) {
+                    Ok(message) => {
+                        let message = message.trim_end().to_string();
 
-impl<'a> Message<'a> {
-    fn new(chat: &'a Chat<'a>, sender_id: u64, text: String) -> Message<'a> {
-        Message {
-            chat,
-            sender_id,
-            text,
-            date: SystemTime::now(),
+                        Some(Message::new(self.id, message))
+                    },
+                    Err(e) => {
+                        println!("Error with reading message from {}: {}", self.connection.addr, e);
+                        return None
+                    }
+                }
+            },
+            Err(e) => {
+                println!("Error with reading message from {}: {}", self.connection.addr, e);
+                return None
+            }
+        }
+    }
+
+    fn send_message(&mut self, message: String) {
+        let mut message_data = message.as_bytes().to_vec();
+        self.connection.stream.write(&mut message_data).unwrap();
+    }
+    
+    fn start(&mut self) {
+        println!("Chat with {}({}) was started", self.name, self.id);
+        'chat: loop {
+            match self.check_new_message() {
+                Some(message) => self.add_message(message),
+                None => println!("No one new messages...")
+            }
+
+            let mut my_message = String::new();
+            // print!("Введите сообщение: ");
+            stdin().read_line(&mut my_message).unwrap();
+            my_message = my_message.trim_end().to_string();
+            if !my_message.is_empty() {
+                if my_message == "/exit" {
+                    break 'chat
+                } else {
+                    println!("You: {} ({})", my_message, Local::now().format("%H:%M:%S"));
+                    self.send_message(my_message);
+                }
+            }
         }
     }
 }
 
-struct RequestListener {
-    listener: TcpListener
+struct Message {
+    chat_id: u64,
+    text: String,
+    date: DateTime<Local>,
 }
 
-pub struct Client<'a> {
+impl Message {
+    fn new(chat_id: u64, text: String) -> Message {
+        Message {
+            chat_id,
+            text,
+            date: Local::now(),
+        }
+    }
+}
+
+pub struct Client {
     id: u64,
     name: String,
     socket_addr: SocketAddr,
     listener: Arc<Mutex<TcpListener>>,
-    listener_handler: Option<JoinHandle<()>>,
-    chats: Vec<Chat<'a>>,
+    chats: Vec<Chat>,
     requests: Arc<Mutex<Vec<Connection>>>
 }
 
-impl<'a> Client<'a> {
-    pub fn new(name: String, socket_addr: SocketAddr) -> Client<'a> {
+impl Client {
+    pub fn new(name: String, socket_addr: SocketAddr) -> Client {
         let generated_id = 0;
         let listener = TcpListener::bind(socket_addr).unwrap();
         // listener.set_nonblocking(true).expect("Error with set nonblocking mode for listener.");
@@ -117,7 +170,6 @@ impl<'a> Client<'a> {
             name,
             socket_addr,
             listener: Arc::new(Mutex::new(listener)),
-            listener_handler: None,
             chats: Vec::new(),
             requests: Arc::new(Mutex::new(Vec::new()))
         }
@@ -131,14 +183,12 @@ impl<'a> Client<'a> {
                     println!("Quiting...");
                     break 'running
                 },
-                1 => self.toggle_connection_listening(),
+                1 => self.listen_connections(),
                 2 => self.accept_connection_request(),
                 3 => self.send_chat_request(),
                 4 => {
                     match self.select_chat() {
-                        Some(chat) => {
-                            println!("Selected {} chat", chat.name)
-                        },
+                        Some(chat) => chat.start(),
                         None => {}
                     }
                 },
@@ -148,18 +198,18 @@ impl<'a> Client<'a> {
                 }
             }
         }
-        self.stop_listener();
+        // self.stop_listener();
     }
 
-    fn stop_listener(&mut self) {
-        match self.listener_handler {
-            Some(handler) => {
-                self.listener_handler = None;
-                handler.join().unwrap();
-            },
-            None => println!("Listener hasn't be started.")
-        }
-    }
+    // fn stop_listener(&mut self) {
+    //     match self.listener_handler {
+    //         Some(handler) => {
+    //             self.listener_handler = None;
+    //             handler.join().unwrap();
+    //         },
+    //         None => println!("Listener hasn't be started.")
+    //     }
+    // }
 
     pub fn main_menu() -> usize {
         let menu_options = [
@@ -253,30 +303,30 @@ impl<'a> Client<'a> {
         }
     }
 
-    fn toggle_connection_listening(&mut self) {
-        match &self.listener_handler {
-            Some(handler) => self.listener_handler = None,
-            None => {
-                let listener = self.listener.clone();
-                let requests = self.requests.clone();
-                self.listener_handler = Some(thread::spawn(move || {
-                    Client::listen_connections(listener, requests)
-                }));
-            }
-        }
-        return
-    }
+    // fn toggle_connection_listening(&mut self) {
+    //     match &self.listener_handler {
+    //         Some(handler) => self.listener_handler = None,
+    //         None => {
+    //             let listener = self.listener.clone();
+    //             let requests = self.requests.clone();
+    //             self.listener_handler = Some(thread::spawn(move || {
+    //                 Client::listen_connections(listener, requests)
+    //             }));
+    //         }
+    //     }
+    //     return
+    // }
 
-    fn listen_connections(listener: Arc<Mutex<TcpListener>>, requests: Arc<Mutex<Vec<Connection>>>) {
+    fn listen_connections(&mut self) {
         println!("New connections listener was started...");
         'listening: loop {
-            let listener = listener.lock().unwrap();
+            let listener = self.listener.lock().unwrap();
     
             // Проверка новых подключений
             match listener.accept() {
                 Ok((stream, addr)) => {
                     println!("New connection with {}", addr);
-                    let mut requests = requests.lock().unwrap();
+                    let mut requests = self.requests.lock().unwrap();
                     requests.push(Connection::new(addr, stream));
                     break 'listening
                 }
@@ -285,13 +335,12 @@ impl<'a> Client<'a> {
         }
     }
 
-    fn select_chat(&mut self) -> Option<&Chat> {
+    fn select_chat(&mut self) -> Option<&mut Chat> {
         if self.chats.is_empty() {
             println!("You have no chats.");
             return None
         } else {
-            loop {
-                println!("Select chat:");
+            println!("Select chat:");
                 for (i, chat) in self.chats.iter().enumerate() {
                     println!("{}. {}", i, chat.name)
                 }
@@ -300,18 +349,19 @@ impl<'a> Client<'a> {
                 selected_chat = selected_chat.trim().to_string();
                 match selected_chat.parse::<usize>() {
                     Ok(n) => {
-                        for (index, chat) in self.chats.iter().enumerate() {
+                        for (index, chat) in self.chats.iter_mut().enumerate() {
                             if n == index {
                                 return Some(chat)
                             }
                         }
-                        println!("Error: Incorrect option!")
+                        println!("Error: Incorrect option!");
+                        return None
                     },
                     Err(e) => {
-                        println!("Error: Incorrect option!\n{}", e)
+                        println!("Error: Can't parse option!\n{}", e);
+                        return None
                     }
                 }
-            }
         }
     }
 }
