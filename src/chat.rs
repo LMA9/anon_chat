@@ -5,6 +5,8 @@ use std::net::{TcpListener, TcpStream, SocketAddr, SocketAddrV4};
 use std::sync::{Arc, Mutex};
 use std::io::stdin;
 use std::io::prelude::*;
+use std::time::Duration;
+use std::sync::mpsc::{channel, Receiver, RecvError};
 
 struct Connection {
     addr: SocketAddr,
@@ -44,7 +46,7 @@ impl Connection {
                 return None
             }
         }
-
+        self.stream.set_nonblocking(true).unwrap();
         Some(Chat::new(target_id, target_name, self))
     }
 }
@@ -76,30 +78,31 @@ impl Chat {
         self.messages.push(message)
     }
 
-    fn check_new_message(&mut self) -> Option<Message> {
+    fn check_new_message(chat_id: u64, stream: &TcpStream) -> Option<Message> {
         let mut message_buffer: [u8; 1024] = [0; 1024];
-        let s = &mut self.connection.stream;
-        let mut handler = s.take(1024);
+        let mut handler = stream.take(1024);
         // Блокирует основной поток
+        println!("Reading");
         match handler.read(&mut message_buffer) {
             Ok(n) => {
                 if n == 0 {
+                    println!("Zero");
                     return None
                 }
                 match String::from_utf8(message_buffer[..n].to_vec()) {
                     Ok(message) => {
                         let message = message.trim_end().to_string();
-
-                        Some(Message::new(self.id, message))
+                        println!("Readed");
+                        Some(Message::new(chat_id, message))
                     },
                     Err(e) => {
-                        println!("Error with reading message from {}: {}", self.connection.addr, e);
+                        println!("Error with reading message from {}: {}", chat_id, e);
                         return None
                     }
                 }
             },
             Err(e) => {
-                println!("Error with reading message from {}: {}", self.connection.addr, e);
+                println!("Error with reading message from {}: {}", chat_id, e);
                 return None
             }
         }
@@ -112,11 +115,19 @@ impl Chat {
     
     fn start(&mut self) {
         println!("Chat with {}({}) was started", self.name, self.id);
-        'chat: loop {
-            match self.check_new_message() {
-                Some(message) => self.add_message(message),
-                None => println!("No one new messages...")
+        // Попробовать через Arc и Mutex
+        let stream = &self.connection.stream;
+        let (tx, rx) = channel();
+        std::thread::spawn(move || {
+            loop {
+                match Chat::check_new_message(self.id, stream) {
+                    Some(message) => {
+                        tx.send(message).unwrap();
+                    }
+                }
             }
+        });
+        'chat: loop {
 
             let mut my_message = String::new();
             // print!("Введите сообщение: ");
@@ -213,11 +224,11 @@ impl Client {
 
     pub fn main_menu() -> usize {
         let menu_options = [
-            (0, "Exit"),
             (1, "Listen conections."),
             (2, "Accept chat request."),
             (3, "Send chat request."),
             (4, "Select chat."),
+            (0, "Exit"),
         ];
         loop {
             println!("\u{001b}[2JSelect menu option:\n{}", menu_options.iter().map(|(i, s)| format!("{}. {}", i, s)).collect::<Vec<String>>().join("\n"));
@@ -228,7 +239,7 @@ impl Client {
                 Ok(n) => {
                     for (index, _) in menu_options.iter() {
                         if n == *index {
-                            return n 
+                            return n
                         }
                     }
                     println!("Error: Incorrect option!")
