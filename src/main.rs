@@ -2,9 +2,10 @@ use std::net::{SocketAddr, Ipv4Addr, IpAddr};
 use std::env::args;
 use std::process;
 
-mod chat;
+pub mod chat;
+pub mod client;
 
-use chat::Client;
+use client::Client;
 
 fn main() {
     let mut port: u16 = 9090;
