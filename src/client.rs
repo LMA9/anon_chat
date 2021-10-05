@@ -2,7 +2,7 @@ use std::net::{TcpListener, TcpStream, SocketAddr, SocketAddrV4};
 use std::sync::{Arc, Mutex};
 use std::io::stdin;
 use std::io::prelude::*;
-use crate::chat::{Chat, Connection};
+use crate::chat::{Chat};
 
 
 pub struct Client {
@@ -11,7 +11,7 @@ pub struct Client {
     socket_addr: SocketAddr,
     listener: Arc<Mutex<TcpListener>>,
     chats: Vec<Chat>,
-    requests: Arc<Mutex<Vec<Connection>>>
+    connections: Arc<Mutex<Vec<TcpStream>>>
 }
 
 impl Client {
@@ -26,7 +26,7 @@ impl Client {
             socket_addr,
             listener: Arc::new(Mutex::new(listener)),
             chats: Vec::new(),
-            requests: Arc::new(Mutex::new(Vec::new()))
+            connections: Arc::new(Mutex::new(Vec::new()))
         }
     }
 
@@ -102,7 +102,7 @@ impl Client {
     }
 
     fn send_chat_request(&mut self) {
-        println!("Please, enter address to connection(e.g: 10.10.14.132:777):\n");
+        println!("Enter address to connection(e.g: 10.10.14.132:777):\n");
         let mut connection_addr = String::new();
         stdin().read_line(&mut connection_addr).unwrap();
         connection_addr = connection_addr.trim().to_string();
@@ -110,11 +110,13 @@ impl Client {
             Ok(addr) => {
                 if let Ok(mut stream) = TcpStream::connect(addr) {
                     self.send_self_creds(&mut stream);
-                    let new_connection = Connection::new(SocketAddr::V4(addr), stream);
                     println!("New connection created! Please wait for opponent accept request...");
 
-                    if let Some(mut new_chat) = new_connection.into_chat() {
-                        self.send_self_creds(&mut new_chat.connection.stream);
+                    if let Some(new_chat) = Chat::from_tcp_stream(stream) {
+                        {
+                            let mut stream = new_chat.stream.lock().unwrap();
+                            self.send_self_creds(&mut stream);
+                        }
                         println!("Chat with {} name was created!", new_chat.name);
                         self.chats.push(new_chat)
                     } else {
@@ -129,24 +131,27 @@ impl Client {
     }
 
     fn accept_connection_request(&mut self) {
-        let mut requests = self.requests.lock().unwrap();
-        if requests.is_empty() {
+        let mut connections = self.connections.lock().unwrap();
+        if connections.is_empty() {
             println!("You have no requests.")
         } else {
             println!("Accept request from:");
-            for (i, request) in requests.iter().enumerate() {
-                println!("{}. {}", i, request.addr )
+            for (i, stream) in connections.iter().enumerate() {
+                println!("{}. {}", i, stream.peer_addr().unwrap() )
             }
             let mut selected_request = String::new();
             stdin().read_line(&mut selected_request).unwrap();
             selected_request = selected_request.trim().to_string();
             match selected_request.parse::<usize>() {
                 Ok(n) => {
-                    let request = requests.remove(n);
-                    if let Some(mut chat) = request.into_chat() {
-                        self.send_self_creds(&mut chat.connection.stream);
-                        println!("Chat with {} name was created!", chat.name);
-                        self.chats.push(chat)
+                    let stream = connections.remove(n);
+                    if let Some(new_chat) = Chat::from_tcp_stream(stream) {
+                        {
+                            let mut stream = new_chat.stream.lock().unwrap();
+                            self.send_self_creds(&mut stream);
+                        }
+                        println!("Chat with {} name was created!", new_chat.name);
+                        self.chats.push(new_chat)
                     } else {
                         println!("Unable to accept request. Aborting...")
                     };
@@ -181,8 +186,8 @@ impl Client {
             match listener.accept() {
                 Ok((stream, addr)) => {
                     println!("New connection with {}", addr);
-                    let mut requests = self.requests.lock().unwrap();
-                    requests.push(Connection::new(addr, stream));
+                    let mut requests = self.connections.lock().unwrap();
+                    requests.push(stream);
                     break 'listening
                 }
                 Err(e) => println!("Connection failed: {}", e),

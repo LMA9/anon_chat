@@ -29,7 +29,7 @@ fn main() {
             addr = parse_addr(&args);
             name = args[3].clone();
         }
-        _ => { panic!("Too much args was given.")}
+        _ => { panic!("Too much args was given.") }
     }
 
     let addr = SocketAddr::new(IpAddr::V4(addr), port);

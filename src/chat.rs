@@ -1,63 +1,96 @@
 extern crate chrono;
 
 use chrono::{DateTime, Local};
-use std::net::{TcpStream, SocketAddr};
+use std::net::{TcpStream};
+use std::time::Duration;
+use std::thread;
 use std::io::stdin;
 use std::io::prelude::*;
-use std::sync::mpsc::{channel, Receiver, RecvError};
+use std::sync::mpsc::{channel};
+use std::sync::{Arc, Mutex};
+use std::fmt;
 
 pub struct Chat {
     id: u64,
     pub name: String,
-    pub connection: Connection,
-    messages: Vec<Message>
+    pub stream: Arc<Mutex<TcpStream>>,
+    messages: Arc<Mutex<Vec<Message>>>
 }
 
 impl Chat {
-    pub fn new(id: u64, name: String, connection: Connection) -> Chat {
-        Chat {
+    pub fn new(id: u64, name: String, stream: TcpStream) -> Self {
+        Self {
             id,
             name,
-            connection,
-            messages: Vec::new()
+            stream: Arc::new(Mutex::new(stream)),
+            messages: Arc::new(Mutex::new(Vec::new()))
         }
     }
 
-    fn add_message(&mut self, message: Message) {
-        let sender = if self.id == message.chat_id {
-            format!("{}({})", self.name, self.id)
-        } else {
-            String::from("You")
-        };
-        println!("{}: {} ({})", sender, message.text, message.date.format("%H:%M:%S"));
-        self.messages.push(message)
-    }
-
-    fn check_new_message(chat_id: u64, stream: &TcpStream) -> Option<Message> {
-        let mut message_buffer: [u8; 1024] = [0; 1024];
-        let mut handler = stream.take(1024);
-        // Блокирует основной поток
-        println!("Reading");
-        match handler.read(&mut message_buffer) {
+    pub fn from_tcp_stream(mut stream: TcpStream) -> Option<Chat> {
+        let mut id_buffer: [u8; 8] = [0; 8];
+        let target_id: u64;
+        let s = &mut stream;
+        let mut handler = s.take(8);
+        handler.read_exact(&mut id_buffer).expect("Failed to parse chat ID");
+        target_id = u64::from_be_bytes(id_buffer);
+        println!("ID was parsed: {}", target_id);
+        
+        let mut name_buffer: [u8; 32] = [0; 32];
+        let target_name: String;
+        let s = &mut stream;
+        let mut handler = s.take(32);
+        match handler.read(&mut name_buffer) {
             Ok(n) => {
-                if n == 0 {
-                    println!("Zero");
-                    return None
-                }
-                match String::from_utf8(message_buffer[..n].to_vec()) {
-                    Ok(message) => {
-                        let message = message.trim_end().to_string();
-                        println!("Readed");
-                        Some(Message::new(chat_id, message))
-                    },
+                match String::from_utf8(name_buffer[..n].to_vec()) {
+                    Ok(name) => target_name = name,
                     Err(e) => {
-                        println!("Error with reading message from {}: {}", chat_id, e);
+                        println!("Error with reading Name from {:?}: {}", stream.peer_addr(), e);
                         return None
                     }
                 }
             },
             Err(e) => {
-                println!("Error with reading message from {}: {}", chat_id, e);
+                println!("Error with reading Name from {:?}: {}", stream.peer_addr(), e);
+                return None
+            }
+        }
+        stream.set_nonblocking(true).unwrap();
+        Some(Chat::new(target_id, target_name, stream))
+    }
+
+    // fn add_message(&mut self, message: Message) {
+    //     let sender = if self.id == message.chat_id {
+    //         format!("{}({})", self.name, self.id)
+    //     } else {
+    //         String::from("You")
+    //     };
+    //     println!("{}: {}", sender, message);
+    //     self.messages.push(message)
+    // }
+
+    fn check_new_message(chat_id: u64, stream: &Arc<Mutex<TcpStream>>) -> Option<Message> {
+        let mut message_buffer: [u8; 1024] = [0; 1024];
+        let s = &mut stream.lock().unwrap();
+        // println!("Reading");
+        match s.read(&mut message_buffer) {
+            Ok(n) => {
+                if n == 0 {
+                    return None
+                }
+                match String::from_utf8(message_buffer[..n].to_vec()) {
+                    Ok(message) => {
+                        let message = message.trim_end().to_string();
+                        Some(Message::new(chat_id, message))
+                    },
+                    Err(e) => {
+                        println!("Error with reading message bytes: {}", e);
+                        return None
+                    }
+                }
+            },
+            Err(_e) => {
+                // println!("Error with reading message from {}: {}", chat_id, e);
                 return None
             }
         }
@@ -65,41 +98,63 @@ impl Chat {
 
     fn send_message(&mut self, message: String) {
         let mut message_data = message.as_bytes().to_vec();
-        self.connection.stream.write(&mut message_data).unwrap();
+        let mut stream = self.stream.lock().unwrap();
+        stream.write(&mut message_data).unwrap();
     }
     
     pub fn start(&mut self) {
         println!("Chat with {}({}) was started", self.name, self.id);
         // Попробовать через Arc и Mutex
-        let stream = &self.connection.stream;
-        let (tx, rx) = channel();
-        std::thread::spawn(move || {
+        let stream = self.stream.clone();
+        // let (tx, rx) = channel();
+        let chat_id = self.id;
+        let chat_name = self.name.clone();
+        let messages = self.messages.clone();
+        let checker = thread::spawn(move || {
+            let stream = stream;
+            let chat_name = chat_name;
+            let messages = messages;
             loop {
-                match Chat::check_new_message(self.id, stream) {
+                match Chat::check_new_message(chat_id, &stream) {
                     Some(message) => {
-                        tx.send(message).unwrap();
-                    }
+                        println!("{}({}): {}", chat_name, chat_id, message);
+                        let mut msgs = messages.lock().unwrap();
+                        msgs.push(message);
+                    },
+                    None => { thread::sleep(Duration::from_secs(1)) }
                 }
             }
         });
+        let mut my_message = String::new();
         'chat: loop {
-
-            let mut my_message = String::new();
+            // match rx.recv_timeout(Duration::from_millis(100)) {
+            //     Ok(message) => { self.add_message(message) },
+            //     Err(_) => {}
+            // }
+            let mut new_part = String::new();
             // print!("Введите сообщение: ");
-            stdin().read_line(&mut my_message).unwrap();
-            my_message = my_message.trim_end().to_string();
-            if !my_message.is_empty() {
-                if my_message == "/exit" {
-                    break 'chat
-                } else {
-                    println!("You: {} ({})", my_message, Local::now().format("%H:%M:%S"));
-                    self.send_message(my_message);
+            stdin().read_line(&mut new_part).unwrap();
+            if !new_part.is_empty() {
+                my_message.push_str(&new_part)
+            }
+            if my_message.ends_with("\n") {
+                my_message = my_message.trim_end().to_string();
+                if !my_message.is_empty() {
+                    if my_message == "/exit" {
+                        break 'chat
+                    } else {
+                        println!("You: {} ({})", my_message, Local::now().format("%H:%M:%S"));
+                        self.send_message(my_message);
+                    }
+                    my_message = String::new();
                 }
             }
         }
+        checker.join().unwrap();
     }
 }
 
+#[derive(Clone, Debug)]
 struct Message {
     chat_id: u64,
     text: String,
@@ -116,45 +171,8 @@ impl Message {
     }
 }
 
-pub struct Connection {
-    pub addr: SocketAddr,
-    pub stream: TcpStream
-}
-
-impl Connection {
-    pub fn new(addr: SocketAddr, stream: TcpStream) -> Connection {
-        Connection { addr, stream }
-    }
-
-    pub fn into_chat<'a>(mut self) -> Option<Chat> {
-        let mut id_buffer: [u8; 8] = [0; 8];
-        let target_id: u64;
-        let s = &mut self.stream;
-        let mut handler = s.take(8);
-        handler.read_exact(&mut id_buffer).expect("Failed to parse chat ID");
-        target_id = u64::from_be_bytes(id_buffer);
-        println!("ID was parsed: {}", target_id);
-        
-        let mut name_buffer: [u8; 32] = [0; 32];
-        let target_name: String;
-        let s = &mut self.stream;
-        let mut handler = s.take(32);
-        match handler.read(&mut name_buffer) {
-            Ok(n) => {
-                match String::from_utf8(name_buffer[..n].to_vec()) {
-                    Ok(name) => target_name = name,
-                    Err(e) => {
-                        println!("Error with reading Name from {}: {}", self.addr, e);
-                        return None
-                    }
-                }
-            },
-            Err(e) => {
-                println!("Error with reading Name from {}: {}", self.addr, e);
-                return None
-            }
-        }
-        self.stream.set_nonblocking(true).unwrap();
-        Some(Chat::new(target_id, target_name, self))
+impl fmt::Display for Message {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} ({})", self.text, self.date.format("%H:%M:%S"))
     }
 }
