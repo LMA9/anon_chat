@@ -10,6 +10,11 @@ use std::sync::mpsc::{channel};
 use std::sync::{Arc, Mutex};
 use std::fmt;
 
+pub enum ChatCloseType {
+    Minimize,
+    Close
+}
+
 pub struct Chat {
     id: u64,
     pub name: String,
@@ -32,7 +37,13 @@ impl Chat {
         let target_id: u64;
         let s = &mut stream;
         let mut handler = s.take(8);
-        handler.read_exact(&mut id_buffer).expect("Failed to parse chat ID");
+        match handler.read_exact(&mut id_buffer) {
+            Ok(()) => {},
+            Err(e) => {
+                println!("Failed to parse chat ID: {}", e);
+                return None
+            }
+        }
         target_id = u64::from_be_bytes(id_buffer);
         println!("ID was parsed: {}", target_id);
         
@@ -42,8 +53,8 @@ impl Chat {
         let mut handler = s.take(32);
         match handler.read(&mut name_buffer) {
             Ok(n) => {
-                match String::from_utf8(name_buffer[..n].to_vec()) {
-                    Ok(name) => target_name = name,
+                target_name = match String::from_utf8(name_buffer[..n].to_vec()) {
+                    Ok(name) => name,
                     Err(e) => {
                         println!("Error with reading Name from {:?}: {}", stream.peer_addr(), e);
                         return None
@@ -58,16 +69,6 @@ impl Chat {
         stream.set_nonblocking(true).unwrap();
         Some(Chat::new(target_id, target_name, stream))
     }
-
-    // fn add_message(&mut self, message: Message) {
-    //     let sender = if self.id == message.chat_id {
-    //         format!("{}({})", self.name, self.id)
-    //     } else {
-    //         String::from("You")
-    //     };
-    //     println!("{}: {}", sender, message);
-    //     self.messages.push(message)
-    // }
 
     fn check_new_message(chat_id: u64, stream: &Arc<Mutex<TcpStream>>) -> Option<Message> {
         let mut message_buffer: [u8; 1024] = [0; 1024];
@@ -104,16 +105,12 @@ impl Chat {
     
     pub fn start(&mut self) {
         println!("Chat with {}({}) was started", self.name, self.id);
-        // Попробовать через Arc и Mutex
         let stream = self.stream.clone();
-        // let (tx, rx) = channel();
+        let (exit_sender, exit_receiver) = channel();
         let chat_id = self.id;
         let chat_name = self.name.clone();
         let messages = self.messages.clone();
         let checker = thread::spawn(move || {
-            let stream = stream;
-            let chat_name = chat_name;
-            let messages = messages;
             loop {
                 match Chat::check_new_message(chat_id, &stream) {
                     Some(message) => {
@@ -123,30 +120,28 @@ impl Chat {
                     },
                     None => { thread::sleep(Duration::from_secs(1)) }
                 }
+                match exit_receiver.try_recv() {
+                    Ok(_) => {
+                        break
+                    },
+                    Err(_) => {}
+                }
             }
+            drop(exit_receiver)
         });
-        let mut my_message = String::new();
         'chat: loop {
-            // match rx.recv_timeout(Duration::from_millis(100)) {
-            //     Ok(message) => { self.add_message(message) },
-            //     Err(_) => {}
-            // }
-            let mut new_part = String::new();
-            // print!("Введите сообщение: ");
-            stdin().read_line(&mut new_part).unwrap();
-            if !new_part.is_empty() {
-                my_message.push_str(&new_part)
-            }
+            let mut my_message = String::new();
+            stdin().read_line(&mut my_message).unwrap();
             if my_message.ends_with("\n") {
                 my_message = my_message.trim_end().to_string();
                 if !my_message.is_empty() {
                     if my_message == "/exit" {
+                        exit_sender.send(true).unwrap();
                         break 'chat
                     } else {
                         println!("You: {} ({})", my_message, Local::now().format("%H:%M:%S"));
                         self.send_message(my_message);
                     }
-                    my_message = String::new();
                 }
             }
         }

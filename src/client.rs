@@ -4,12 +4,71 @@ use std::io::stdin;
 use std::io::prelude::*;
 use crate::chat::{Chat};
 
+struct Listener {
+    tcp_listener: Arc<Mutex<TcpListener>>,
+    is_listen: Arc<Mutex<bool>>,
+    connections: Arc<Mutex<Vec<TcpStream>>>
+}
+
+impl Listener {
+    fn init(socket_addr: SocketAddr, connections: Arc<Mutex<Vec<TcpStream>>>) -> Self {
+        let tcp_listener = Arc::new(Mutex::new(TcpListener::bind(socket_addr).unwrap()));
+        let listener = Self {
+            tcp_listener,
+            connections,
+            is_listen: Arc::new(Mutex::new(false)),
+        };
+        listener.start_listener();
+        listener
+    }
+
+    fn set_listening(&mut self, listen: bool) {
+        *self.is_listen.lock().unwrap() = listen;
+        if listen {
+            println!("Listening was started...")
+        } else {
+            println!("Listening was stoped...")
+        }
+        std::thread::sleep(std::time::Duration::from_millis(700))
+    }
+    
+    fn is_listen(&self) -> bool {
+        *self.is_listen.lock().unwrap()
+    }
+
+    fn start_listener(&self) {
+        let listener = self.tcp_listener.clone();
+        let connections = self.connections.clone();
+        let is_listen = self.is_listen.clone();
+
+        std::thread::spawn(move || {
+            loop {
+                let listener = listener.lock().unwrap();
+            
+                // Проверка новых подключений
+                match listener.accept() {
+                    Ok((stream, addr)) => {
+                        if *is_listen.lock().unwrap() {
+                            println!("New connection with {}", addr);
+                            let mut requests = connections.lock().unwrap();
+                            requests.push(stream);
+                        } else {
+                            drop(stream);
+                        }
+                    }
+                    Err(e) => println!("Connection failed: {}", e),
+                }
+            }
+        });
+        std::thread::sleep(std::time::Duration::from_secs(1))
+    }
+}
+
 
 pub struct Client {
     id: u64,
     name: String,
-    socket_addr: SocketAddr,
-    listener: Arc<Mutex<TcpListener>>,
+    listener: Listener,
     chats: Vec<Chat>,
     connections: Arc<Mutex<Vec<TcpStream>>>
 }
@@ -17,16 +76,14 @@ pub struct Client {
 impl Client {
     pub fn new(name: String, socket_addr: SocketAddr) -> Client {
         let generated_id = 0;
-        let listener = TcpListener::bind(socket_addr).unwrap();
-        // listener.set_nonblocking(true).expect("Error with set nonblocking mode for listener.");
+        let connections = Arc::new(Mutex::new(Vec::new()));
 
         Client {
             id: generated_id,
             name,
-            socket_addr,
-            listener: Arc::new(Mutex::new(listener)),
+            listener: Listener::init(socket_addr, connections.clone()),
             chats: Vec::new(),
-            connections: Arc::new(Mutex::new(Vec::new()))
+            connections: connections
         }
     }
 
@@ -38,7 +95,7 @@ impl Client {
                     println!("Quiting...");
                     break 'running
                 },
-                1 => self.listen_connections(),
+                1 => self.toggle_connections_listening(),
                 2 => self.accept_connection_request(),
                 3 => self.send_chat_request(),
                 4 => {
@@ -53,22 +110,15 @@ impl Client {
                 }
             }
         }
-        // self.stop_listener();
     }
 
-    // fn stop_listener(&mut self) {
-    //     match self.listener_handler {
-    //         Some(handler) => {
-    //             self.listener_handler = None;
-    //             handler.join().unwrap();
-    //         },
-    //         None => println!("Listener hasn't be started.")
-    //     }
-    // }
+    pub fn toggle_connections_listening(&mut self) {
+        self.listener.set_listening(!self.listener.is_listen())
+    }
 
     pub fn main_menu() -> usize {
         let menu_options = [
-            (1, "Listen conections."),
+            (1, "Toggle conections listening."),
             (2, "Accept chat request."),
             (3, "Send chat request."),
             (4, "Select chat."),
@@ -113,10 +163,10 @@ impl Client {
                     println!("New connection created! Please wait for opponent accept request...");
 
                     if let Some(new_chat) = Chat::from_tcp_stream(stream) {
-                        {
-                            let mut stream = new_chat.stream.lock().unwrap();
-                            self.send_self_creds(&mut stream);
-                        }
+                        // {
+                        //     let mut stream = new_chat.stream.lock().unwrap();
+                        //     self.send_self_creds(&mut stream);
+                        // }
                         println!("Chat with {} name was created!", new_chat.name);
                         self.chats.push(new_chat)
                     } else {
@@ -128,6 +178,7 @@ impl Client {
             },
             Err(e) => println!("Wrong connection address: {}", e)
         }
+        std::thread::sleep(std::time::Duration::from_secs(1))
     }
 
     fn accept_connection_request(&mut self) {
@@ -159,38 +210,6 @@ impl Client {
                 Err(e) => {
                     println!("Error: Incorrect option!\n{}", e)
                 }
-            }
-        }
-    }
-
-    // fn toggle_connection_listening(&mut self) {
-    //     match &self.listener_handler {
-    //         Some(handler) => self.listener_handler = None,
-    //         None => {
-    //             let listener = self.listener.clone();
-    //             let requests = self.requests.clone();
-    //             self.listener_handler = Some(thread::spawn(move || {
-    //                 Client::listen_connections(listener, requests)
-    //             }));
-    //         }
-    //     }
-    //     return
-    // }
-
-    fn listen_connections(&mut self) {
-        println!("New connections listener was started...");
-        'listening: loop {
-            let listener = self.listener.lock().unwrap();
-    
-            // Проверка новых подключений
-            match listener.accept() {
-                Ok((stream, addr)) => {
-                    println!("New connection with {}", addr);
-                    let mut requests = self.connections.lock().unwrap();
-                    requests.push(stream);
-                    break 'listening
-                }
-                Err(e) => println!("Connection failed: {}", e),
             }
         }
     }

@@ -18,16 +18,16 @@ fn main() {
             port, addr, name)
         }
         2 => {
-            port = parse_port(&args)
+            name = args[1].clone();
         }
         3 => {
+            name = args[1].clone();
             port = parse_port(&args);
-            addr = parse_addr(&args);
         }
         4 => {
+            name = args[1].clone();
             port = parse_port(&args);
             addr = parse_addr(&args);
-            name = args[3].clone();
         }
         _ => { panic!("Too much args was given.") }
     }
@@ -39,7 +39,7 @@ fn main() {
 }
 
 fn parse_port(args: &Vec<String>) -> u16 {
-    match args[1].parse() {
+    match args[2].parse() {
         Ok(entered_port) => entered_port,
         Err(e) => {
             println!("Error to parse port number: {}", e);
@@ -49,7 +49,7 @@ fn parse_port(args: &Vec<String>) -> u16 {
 }
 
 fn parse_addr(args: &Vec<String>) -> Ipv4Addr {
-    match args[2].parse() {
+    match args[3].parse() {
         Ok(addr) => addr,
         Err(e) => {
             println!("Error to parse address: {}", e);
