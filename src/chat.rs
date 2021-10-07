@@ -73,7 +73,6 @@ impl Chat {
     fn check_new_message(chat_id: u64, stream: &Arc<Mutex<TcpStream>>) -> Option<Message> {
         let mut message_buffer: [u8; 1024] = [0; 1024];
         let s = &mut stream.lock().unwrap();
-        // println!("Reading");
         match s.read(&mut message_buffer) {
             Ok(n) => {
                 if n == 0 {
@@ -91,7 +90,6 @@ impl Chat {
                 }
             },
             Err(_e) => {
-                // println!("Error with reading message from {}: {}", chat_id, e);
                 return None
             }
         }
